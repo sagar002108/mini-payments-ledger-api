@@ -1,8 +1,10 @@
 # Mini Payments Ledger API
 
-A secure REST API for managing payment accounts and transactions, built with Java 21, Spring Boot, and PostgreSQL.
+[![Ledger API CI](https://github.com/sagar002108/mini-payments-ledger-api/actions/workflows/ci.yml/badge.svg)](https://github.com/sagar002108/mini-payments-ledger-api/actions/workflows/ci.yml)
 
-The project demonstrates backend engineering concepts used in financial systems, including double-entry bookkeeping, transactional consistency, API-key authentication, idempotency, concurrency control, and automated integration testing.
+A secure REST API for managing payment accounts and financial transactions, built with Java 21, Spring Boot, and PostgreSQL.
+
+This project demonstrates backend engineering concepts used in financial systems, including double-entry bookkeeping, transactional consistency, API-key authentication, idempotency, concurrency control, database integrity, and automated integration testing.
 
 ## Features
 
@@ -12,8 +14,11 @@ The project demonstrates backend engineering concepts used in financial systems,
 - **Double-Entry Ledger** – Maintain balanced debit and credit entries for financial transactions.
 - **Idempotency** – Prevent duplicate transactions when requests are retried.
 - **API-Key Authentication** – Authenticate clients using securely hashed API keys.
+- **Client Isolation** – Restrict account access based on the authenticated API client.
 - **Transaction History** – Retrieve account transaction records with pagination.
-- **Concurrency Control** – Use database row locking to protect account balances during transfers.
+- **Concurrency Control** – Use database row locking and deterministic lock ordering to protect account balances.
+- **Database Integrity** – Use PostgreSQL deferred constraint triggers to validate completed transactions.
+- **Ledger Immutability** – Prevent ledger entries from being updated, deleted, or truncated.
 - **Database Migrations** – Manage schema changes using Flyway.
 - **Automated Testing** – Unit and integration tests using JUnit and Testcontainers.
 - **Docker Support** – Containerized application and PostgreSQL database.
@@ -69,9 +74,7 @@ PostgreSQL
 
 ### Financial Transaction Design
 
-The ledger uses double-entry bookkeeping.
-
-Each completed transaction creates corresponding debit and credit entries.
+The ledger uses double-entry bookkeeping. Each completed transaction creates corresponding debit and credit entries.
 
 For example, a transfer of 300 INR:
 
@@ -80,9 +83,19 @@ For example, a transfer of 300 INR:
 | Sender | DEBIT | 300 INR |
 | Receiver | CREDIT | 300 INR |
 
-The debit and credit entries are persisted in the same database transaction as the corresponding balance updates.
+Both entries and the corresponding account balance updates are persisted within the same database transaction.
 
-The ledger records financial movements, while account balances are maintained as cached balances.
+Account balances are maintained as cached balances, while ledger entries record the underlying financial movements.
+
+### Transaction Safety and Data Integrity
+
+The project includes several mechanisms to protect financial operations:
+
+- **Atomic transactions:** Related database changes are committed or rolled back together.
+- **Idempotency:** Requests are identified using client-scoped idempotency keys and request hashes.
+- **Concurrency control:** Account rows are locked in deterministic UUID order to reduce race conditions and deadlocks.
+- **Balanced ledger validation:** Deferred PostgreSQL constraint triggers validate that completed transactions have exactly one debit and one credit, with matching amounts and currencies.
+- **Ledger immutability:** Database triggers prevent ledger entries from being updated, deleted, or truncated.
 
 ## API Endpoints
 
@@ -112,7 +125,7 @@ Content-Type: application/json
 
 Repeated requests with the same key and payload return the original transaction result rather than creating another transaction.
 
-Reusing a key with a different payload returns HTTP 409 Conflict.
+Reusing a key with a different payload returns HTTP `409 Conflict`.
 
 ## Running the Project
 
@@ -137,18 +150,32 @@ cd mini-payments-ledger-api
 docker compose up -d
 ```
 
-PostgreSQL runs on port `5434` and uses the following local development configuration:
+The local development database uses the following configuration:
 
 ```text
 Database: ledger
 Username: ledger
 Password: ledger
-Port: 5434
+Host port: 5434
+Container port: 5432
 ```
 
 Flyway automatically applies database migrations when the application starts.
 
-### 3. Run the application
+### 3. Configure API-key authentication
+
+The application authenticates clients using SHA-256 hashes stored in the `api_clients` table.
+
+For local development:
+
+1. Generate a random API key.
+2. Calculate its SHA-256 hash.
+3. Register the client ID and hash in the `api_clients` table with `ACTIVE` status.
+4. Keep the original API key private and use it in API requests.
+
+Never commit actual API keys or production credentials to the repository.
+
+### 4. Run the application
 
 On Windows PowerShell:
 
@@ -163,15 +190,13 @@ The API starts at:
 http://localhost:8080
 ```
 
-### 4. Open Swagger documentation
+### 5. Open Swagger documentation
 
 ```text
 http://localhost:8080/swagger-ui/index.html
 ```
 
 Use the **Authorize** option to provide your API key.
-
-API clients must be provisioned in the `api_clients` table with a SHA-256 API-key hash. Do not commit actual API keys to the repository.
 
 ## Running with Docker
 
@@ -181,16 +206,16 @@ Build the application image:
 docker build -t ledger-api:1.0 .
 ```
 
-The application container can connect to the PostgreSQL container using the Docker network created by Docker Compose:
+When PostgreSQL is running through Docker Compose, the application container can connect to it using the Compose network:
 
-```bash
-docker run -d \
-  --name ledger-api-app \
-  --network ledger-api_default \
-  -p 8081:8080 \
-  -e DB_URL=jdbc:postgresql://ledger-postgres:5432/ledger \
-  -e DB_USER=ledger \
-  -e DB_PASSWORD=ledger \
+```powershell
+docker run -d `
+  --name ledger-api-app `
+  --network ledger-api_default `
+  -p 8081:8080 `
+  -e DB_URL=jdbc:postgresql://ledger-postgres:5432/ledger `
+  -e DB_USER=ledger `
+  -e DB_PASSWORD=ledger `
   ledger-api:1.0
 ```
 
@@ -204,7 +229,7 @@ http://localhost:8081/actuator/health
 
 The project uses JUnit 5 and Testcontainers to run integration tests against a real PostgreSQL container.
 
-Run the complete verification lifecycle:
+Run the complete Maven verification lifecycle:
 
 ```bash
 mvn clean verify
@@ -214,10 +239,10 @@ The test suite covers:
 
 - Account creation and ownership.
 - Successful deposits and withdrawals.
-- Successful transfers and ledger integrity.
+- Successful transfers and balanced ledger entries.
 - Idempotency and duplicate request handling.
+- Concurrent requests and transfers.
 - Insufficient balance validation.
-- Concurrent transfers.
 - API-key authentication and client isolation.
 - Transaction history and pagination.
 
@@ -225,30 +250,35 @@ The test suite covers:
 
 GitHub Actions automatically runs the Maven verification workflow on pushes and pull requests targeting `main` or `master`.
 
-Workflow:
+The workflow:
 
-1. Check out the repository.
-2. Set up Java 21.
-3. Configure Maven dependency caching.
-4. Run `./mvnw -B clean verify`.
+1. Checks out the repository.
+2. Sets up Java 21.
+3. Configures Maven dependency caching.
+4. Runs `./mvnw -B clean verify`.
 
 ## Future Improvements
 
-- Improve concurrent idempotency handling across all transaction types.
-- Add transaction history metadata and filtering.
-- Add stronger reconciliation and ledger integrity checks.
-- Introduce rate limiting and monitoring.
-- Add API-key provisioning and management endpoints.
-- Improve deployment configuration and secrets management.
+Potential areas for further development:
+
+- Transaction history filtering and richer pagination metadata.
+- API-key provisioning, rotation, and management endpoints.
+- Rate limiting and improved monitoring.
+- Additional reconciliation and database integrity tests.
+- Production deployment configuration and secrets management.
 
 ## Project Status
 
-This is a portfolio project designed to demonstrate backend development, database design, financial transaction processing, security, and testing concepts. It is not intended for handling real customer funds or production financial operations.
+This is a portfolio project designed to demonstrate backend development, database design, financial transaction processing, security, concurrency control, and automated testing.
+
+It is not intended for handling real customer funds or production financial operations.
 
 ## Author
 
 **Sagar R.**
 
-GitHub: [@sagar002108](https://github.com/sagar002108)
+- Email: [sagarr212000@gmail.com](mailto:sagarr212000@gmail.com)
+- GitHub: [@sagar002108](https://github.com/sagar002108)
+- LinkedIn: [Sagar R.](https://www.linkedin.com/in/sagar-r-692904259/)
 
-Repository: [Mini Payments Ledger API](https://github.com/sagar002108/mini-payments-ledger-api)
+**Repository:** [Mini Payments Ledger API](https://github.com/sagar002108/mini-payments-ledger-api)
