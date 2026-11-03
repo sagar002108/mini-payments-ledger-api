@@ -1,5 +1,7 @@
 package com.sagar.ledger_api.repository;
 
+import java.sql.PreparedStatement;
+import org.springframework.jdbc.core.ConnectionCallback;
 import com.sagar.ledger_api.model.Transfer;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -78,4 +80,23 @@ public class TransferRepository {
             transfer.status()
     );
   }
+
+     public void lockIdempotencyKey(
+        String clientId,
+        String idempotencyKey) {
+
+    String lockValue = clientId.length() + ":" + clientId
+            + ":" + idempotencyKey;
+
+    jdbcTemplate.execute((ConnectionCallback<Void>) connection -> {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))")) {
+
+            statement.setString(1, lockValue);
+            statement.execute();
+        }
+
+        return null;
+    });
+}
 }

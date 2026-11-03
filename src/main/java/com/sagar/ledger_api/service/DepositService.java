@@ -63,6 +63,8 @@ public class DepositService {
 
         String requestHash = createRequestHash(request);
 
+        depositRepository.lockIdempotencyKey(clientId, idempotencyKey);
+        
         DepositRecord existing =
                 depositRepository.findByIdempotencyKey(
                         clientId, idempotencyKey

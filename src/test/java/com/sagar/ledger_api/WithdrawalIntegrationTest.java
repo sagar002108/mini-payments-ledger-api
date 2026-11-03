@@ -18,6 +18,11 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -148,6 +153,83 @@ class WithdrawalIntegrationTest extends AbstractIntegrationTest {
 
         assertEquals(1, withdrawalCount);
     }
+
+    @Test
+    void shouldHandleConcurrentWithdrawalsWithSameIdempotencyKey() throws Exception {
+
+        String clientId = "withdrawal-concurrent-client";
+
+        AccountResponse account = createFundedAccount(clientId, "1000.0000");
+
+        WithdrawalRequest request = new WithdrawalRequest(
+                account.id(),
+                new BigDecimal("200.0000"),
+                "THB"
+        );
+
+        String key = "concurrent-withdrawal-" + UUID.randomUUID();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+
+        try {
+                Future<WithdrawalResponse> firstFuture = executor.submit(() -> {
+                ready.countDown();
+                if (!start.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Timed out waiting to start");
+                }
+                return withdrawalService.createWithdrawal(request, clientId, key);
+                });
+
+                Future<WithdrawalResponse> secondFuture = executor.submit(() -> {
+                ready.countDown();
+                if (!start.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Timed out waiting to start");
+                }
+                return withdrawalService.createWithdrawal(request, clientId, key);
+                });
+
+                assertTrue(ready.await(5, TimeUnit.SECONDS));
+                start.countDown();
+
+                WithdrawalResponse first = firstFuture.get();
+                WithdrawalResponse second = secondFuture.get();
+
+                assertEquals(first.id(), second.id());
+
+                Integer withdrawalCount = jdbcTemplate.queryForObject(
+                        """
+                        SELECT COUNT(*) FROM withdrawals
+                        WHERE client_id = ? AND idempotency_key = ?
+                        """,
+                        Integer.class,
+                        clientId,
+                        key
+                );
+
+                assertEquals(1, withdrawalCount);
+
+                Integer entryCount = jdbcTemplate.queryForObject(
+                        "SELECT COUNT(*) FROM ledger_entries WHERE withdrawal_id = ?",
+                        Integer.class,
+                        first.id()
+                );
+
+                assertEquals(2, entryCount);
+
+                BigDecimal balance = jdbcTemplate.queryForObject(
+                        "SELECT balance FROM accounts WHERE id = ?",
+                        BigDecimal.class,
+                        account.id()
+                );
+
+                assertEquals(0, balance.compareTo(new BigDecimal("800.0000")));
+
+        } finally {
+                executor.shutdownNow();
+        }
+        }
 
     @Test
     void shouldRejectDifferentRequestWithSameIdempotencyKey() {

@@ -65,6 +65,8 @@ public class WithdrawalService {
 
         String requestHash = createRequestHash(request);
 
+        withdrawalRepository.lockIdempotencyKey(clientId, idempotencyKey);
+        
         WithdrawalRecord existing =
                 withdrawalRepository.findByIdempotencyKey(
                         clientId, idempotencyKey

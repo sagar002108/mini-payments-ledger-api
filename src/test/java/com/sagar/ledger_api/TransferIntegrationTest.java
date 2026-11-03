@@ -21,6 +21,8 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -116,6 +118,83 @@ class TransferIntegrationTest extends AbstractIntegrationTest {
 
         assertEquals(0, updatedSender.balance().compareTo(new BigDecimal("800.00")));
         assertEquals(0, updatedReceiver.balance().compareTo(new BigDecimal("200.00")));
+    }
+
+    @Test
+    void shouldHandleConcurrentRequestsWithSameIdempotencyKey() throws Exception {
+
+        AccountResponse sender = createAccount();
+        AccountResponse receiver = createAccount();
+
+        depositMoney(sender.id(), "1000.00", "deposit-" + UUID.randomUUID());
+
+        String key = "concurrent-same-key-" + UUID.randomUUID();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+
+        try {
+                Future<TransferResponse> firstFuture = executor.submit(() -> {
+                ready.countDown();
+                if (!start.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Timed out waiting to start");
+                }
+                return transferMoney(sender.id(), receiver.id(), "200.00", key);
+                });
+
+                Future<TransferResponse> secondFuture = executor.submit(() -> {
+                ready.countDown();
+                if (!start.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Timed out waiting to start");
+                }
+                return transferMoney(sender.id(), receiver.id(), "200.00", key);
+                });
+
+                assertTrue(ready.await(5, TimeUnit.SECONDS));
+                start.countDown();
+
+                TransferResponse first = firstFuture.get();
+                TransferResponse second = secondFuture.get();
+
+                // Both requests must return the same transfer.
+                assertEquals(first.id(), second.id());
+
+                // Only one transfer record should exist for this key.
+                Integer transferCount = jdbcTemplate.queryForObject(
+                        """
+                        SELECT COUNT(*)
+                        FROM transfers
+                        WHERE client_id = ? AND idempotency_key = ?
+                        """,
+                        Integer.class,
+                        CLIENT_ID,
+                        key
+                );
+
+                assertEquals(1, transferCount);
+
+                // Only two ledger entries should be created.
+                Integer entryCount = jdbcTemplate.queryForObject(
+                        "SELECT COUNT(*) FROM ledger_entries WHERE transfer_id = ?",
+                        Integer.class,
+                        first.id()
+                );
+
+                assertEquals(2, entryCount);
+
+                // Money must only be deducted once.
+                AccountResponse updatedSender =
+                        accountService.getAccount(sender.id(), CLIENT_ID);
+                AccountResponse updatedReceiver =
+                        accountService.getAccount(receiver.id(), CLIENT_ID);
+
+                assertEquals(0, updatedSender.balance().compareTo(new BigDecimal("800.00")));
+                assertEquals(0, updatedReceiver.balance().compareTo(new BigDecimal("200.00")));
+
+        } finally {
+                executor.shutdownNow();
+        }
     }
 
     @Test

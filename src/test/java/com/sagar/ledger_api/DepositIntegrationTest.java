@@ -16,6 +16,11 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -101,6 +106,86 @@ class DepositIntegrationTest extends AbstractIntegrationTest {
         );
 
         assertEquals(0, new BigDecimal("500.0000").compareTo(balance));
+    }
+
+    @Test
+    void shouldHandleConcurrentDepositsWithSameIdempotencyKey() throws Exception {
+
+        String clientId = "integration-client";
+
+        AccountResponse account = accountService.createAccount(
+                new CreateAccountRequest("THB"),
+                clientId
+        );
+
+        DepositRequest request = new DepositRequest(
+                account.id(),
+                new BigDecimal("500.0000"),
+                "THB"
+        );
+
+        String key = "concurrent-deposit-" + UUID.randomUUID();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+
+        try {
+                Future<DepositResponse> firstFuture = executor.submit(() -> {
+                ready.countDown();
+                if (!start.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Timed out waiting to start");
+                }
+                return depositService.createDeposit(request, clientId, key);
+                });
+
+                Future<DepositResponse> secondFuture = executor.submit(() -> {
+                ready.countDown();
+                if (!start.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Timed out waiting to start");
+                }
+                return depositService.createDeposit(request, clientId, key);
+                });
+
+                assertTrue(ready.await(5, TimeUnit.SECONDS));
+                start.countDown();
+
+                DepositResponse first = firstFuture.get();
+                DepositResponse second = secondFuture.get();
+
+                assertEquals(first.id(), second.id());
+
+                Integer depositCount = jdbcTemplate.queryForObject(
+                        """
+                        SELECT COUNT(*) FROM deposits
+                        WHERE client_id = ? AND idempotency_key = ?
+                        """,
+                        Integer.class,
+                        clientId,
+                        key
+                );
+
+                assertEquals(1, depositCount);
+
+                Integer entryCount = jdbcTemplate.queryForObject(
+                        "SELECT COUNT(*) FROM ledger_entries WHERE deposit_id = ?",
+                        Integer.class,
+                        first.id()
+                );
+
+                assertEquals(2, entryCount);
+
+                BigDecimal balance = jdbcTemplate.queryForObject(
+                        "SELECT balance FROM accounts WHERE id = ?",
+                        BigDecimal.class,
+                        account.id()
+                );
+
+                assertEquals(0, balance.compareTo(new BigDecimal("500.0000")));
+
+        } finally {
+                executor.shutdownNow();
+        }
     }
 
     @Test

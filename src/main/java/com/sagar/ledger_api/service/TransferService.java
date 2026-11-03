@@ -74,6 +74,9 @@ public class TransferService {
 
         String requestHash = createRequestHash(request);
 
+        // Serialize requests using the same client ID and idempotency key.
+        transferRepository.lockIdempotencyKey(clientId, idempotencyKey);
+
         Transfer existing = transferRepository.findByIdempotencyKey(
                 clientId, idempotencyKey
         );
